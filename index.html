@@ -109,54 +109,119 @@ function rnd(a,b){
     return a+Math.random()*(b-a);
 }
 
-function collectEnteredResults(){
-    let values=[];
+function collectStandards(){
+    let standards=[];
+
     for(let r=0;r<ROWS;r++){
         for(let c=0;c<COLS;c++){
-            const v=parseNumber(document.getElementById(inputId("rslt",r,c)).value);
-            if(v!==null) values.push(v);
+            const well=wellName(r,c);
+
+            if(well.startsWith("STD")){
+                const od=parseNumber(document.getElementById(inputId("od",r,c)).value);
+                const rslt=parseNumber(document.getElementById(inputId("rslt",r,c)).value);
+
+                if(od!==null && rslt!==null){
+                    standards.push({well,od,rslt});
+                }
+            }
         }
     }
-    return values;
+
+    // Конкурентный ИФА: обычно OD убывает при росте результата.
+    standards.sort((a,b)=>b.od-a.od);
+    return standards;
 }
 
-function randomFromEntered(values){
-    if(values.length===0) return rnd(0,20);
+function collectEnteredSampleODs(){
+    let ods=[];
 
-    const base=values[Math.floor(Math.random()*values.length)];
-    const spread=Math.max(0.5,Math.abs(base)*0.15);
-    let value=base+rnd(-spread,spread);
+    for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+            const well=wellName(r,c);
 
-    if(value<0) value=0;
-    return value;
+            if(well.startsWith("SMP")){
+                const od=parseNumber(document.getElementById(inputId("od",r,c)).value);
+                if(od!==null) ods.push(od);
+            }
+        }
+    }
+
+    return ods;
 }
 
-function odFromResult(result){
-    // учебная обратная зависимость: выше RSLT -> ниже OD
-    let od=1.75-(result/900)*1.45;
-    if(od<0.25) od=0.25;
-    if(od>1.75) od=1.75;
-    od+=rnd(-0.02,0.02);
-    if(od<0.001) od=0.001;
-    return od;
+function generateSampleOD(sampleODs,standards){
+    // Если введены реальные SMP, продолжаем похожее распределение OD.
+    if(sampleODs.length>0){
+        const base=sampleODs[Math.floor(Math.random()*sampleODs.length)];
+        const spread=Math.max(0.015,Math.abs(base)*0.035);
+        let od=base+rnd(-spread,spread);
+
+        if(standards.length>=2){
+            const maxOD=Math.max(...standards.map(s=>s.od));
+            const minOD=Math.min(...standards.map(s=>s.od));
+            od=Math.max(minOD,Math.min(maxOD,od));
+        }
+
+        return od;
+    }
+
+    // Если SMP ещё не введены, берём учебный диапазон:
+    // чаще высокие OD и низкие RSLT, как в исходном примере.
+    if(standards.length>=2){
+        const maxOD=Math.max(...standards.map(s=>s.od));
+        const minOD=Math.min(...standards.map(s=>s.od));
+        const low=minOD+(maxOD-minOD)*0.35;
+        const high=maxOD;
+        return rnd(low,high);
+    }
+
+    return rnd(0.8,1.75);
+}
+
+function resultFromCalibration(od,standards){
+    if(standards.length<2) return 0;
+
+    const highestOD=standards[0];
+    const lowestOD=standards[standards.length-1];
+
+    if(od>=highestOD.od) return highestOD.rslt;
+    if(od<=lowestOD.od) return lowestOD.rslt;
+
+    for(let i=0;i<standards.length-1;i++){
+        const a=standards[i];
+        const b=standards[i+1];
+
+        if(od<=a.od && od>=b.od){
+            const k=(od-a.od)/(b.od-a.od);
+            return a.rslt+k*(b.rslt-a.rslt);
+        }
+    }
+
+    return 0;
 }
 
 function generateRun(){
-    const values=collectEnteredResults();
+    const standards=collectStandards();
+    const sampleODs=collectEnteredSampleODs();
 
     for(let r=0;r<ROWS;r++){
         for(let c=0;c<COLS;c++){
-            const rsltInput=document.getElementById(inputId("rslt",r,c));
-            const odInput=document.getElementById(inputId("od",r,c));
+            const well=wellName(r,c);
 
-            if(rsltInput.value.trim()===""){
-                const value=randomFromEntered(values);
-                rsltInput.value=value.toFixed(2);
-            }
+            if(!well.startsWith("SMP")) continue;
+
+            const odInput=document.getElementById(inputId("od",r,c));
+            const rsltInput=document.getElementById(inputId("rslt",r,c));
 
             if(odInput.value.trim()===""){
-                const resultValue=parseNumber(rsltInput.value)||0;
-                odInput.value=odFromResult(resultValue).toFixed(3);
+                const odValue=generateSampleOD(sampleODs,standards);
+                odInput.value=odValue.toFixed(3);
+            }
+
+            if(rsltInput.value.trim()===""){
+                const odValue=parseNumber(odInput.value);
+                const resultValue=resultFromCalibration(odValue,standards);
+                rsltInput.value=resultValue.toFixed(3);
             }
         }
     }
