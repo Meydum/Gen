@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ELISA Run Generator</title>
+<style>
+body{margin:20px;font-family:Arial,sans-serif;background:#f4f6f8}
+h2{margin:0 0 12px 0}
+.note{font-size:13px;color:#555;margin-bottom:10px}
+button{padding:10px 18px;font-size:16px;cursor:pointer;margin:10px 10px 16px 0}
+table{border-collapse:collapse;background:white}
+th,td{border:1px solid #999;padding:3px;text-align:center;min-width:74px;height:25px}
+th{background:#e6edf7;font-weight:bold}
+.rowlabel{background:#eef2f7;font-weight:bold;min-width:72px}
+input{width:72px;border:none;outline:none;text-align:center;font-size:13px;background:transparent}
+input:focus{background:#fff8bf}
+.wellcell{font-weight:bold;background:#fafafa}
+.blockgap td{height:8px;background:#f4f6f8;border-left:none;border-right:none}
+</style>
+</head>
+
+<body>
+
+<h2>🐈</h2>
+<button onclick="generateRun()">Сгенерировать продолжение и скачать Excel</button>
+<button onclick="clearSamples()">Очистить SMP</button>
+
+<table id="report"></table>
+
+<script>
+const stdDefaults=[
+    {well:"STD1",od:"1.738",rslt:"0"},
+    {well:"STD2",od:"1.105",rslt:"11.11"},
+    {well:"STD3",od:"0.776",rslt:"33.33"},
+    {well:"STD4",od:"0.623",rslt:"100"},
+    {well:"STD5",od:"0.447",rslt:"300"},
+    {well:"STD6",od:"0.268",rslt:"900"}
+];
+
+const ROWS=8;
+const COLS=12;
+
+function wellName(row,col){
+    if(col===0){
+        if(row<6) return "STD"+(row+1);
+        if(row===6) return "SMP1";
+        return "SMP2";
+    }
+    // Важно: нумерация образцов сверху вниз внутри каждого столбца
+    return "SMP"+(3+(col-1)*8+row);
+}
+
+function callNumber(row,col){
+    // CALL тоже идет сверху вниз по блокам, как печать анализатора
+    return row*COLS+col+1;
+}
+
+function inputId(type,row,col){
+    return type+"_"+row+"_"+col;
+}
+
+function buildTable(){
+    const table=document.getElementById("report");
+    let html="";
+
+    html+="<tr><th></th>";
+    for(let c=1;c<=COLS;c++) html+="<th>"+c+"</th>";
+    html+="</tr>";
+
+    for(let r=0;r<ROWS;r++){
+        html+="<tr><td class='rowlabel'>CALL</td>";
+        for(let c=0;c<COLS;c++) html+="<td>&nbsp;</td>";
+        html+="</tr>";
+
+        html+="<tr><td class='rowlabel'>CalcOD</td>";
+        for(let c=0;c<COLS;c++){
+            let value="";
+            if(c===0 && r<6) value=stdDefaults[r].od;
+            html+="<td><input id='"+inputId("od",r,c)+"' value='"+value+"'></td>";
+        }
+        html+="</tr>";
+
+        html+="<tr><td class='rowlabel'>Well</td>";
+        for(let c=0;c<COLS;c++){
+            html+="<td class='wellcell' id='"+inputId("well",r,c)+"'>"+wellName(r,c)+"</td>";
+        }
+        html+="</tr>";
+
+        html+="<tr><td class='rowlabel'>RSLT</td>";
+        for(let c=0;c<COLS;c++){
+            let value="";
+            if(c===0 && r<6) value=stdDefaults[r].rslt;
+            html+="<td><input id='"+inputId("rslt",r,c)+"' value='"+value+"'></td>";
+        }
+        html+="</tr>";
+
+        if(r<ROWS-1) html+="<tr class='blockgap'><td colspan='13'></td></tr>";
+    }
+
+    table.innerHTML=html;
+}
+
+function parseNumber(value){
+    const n=parseFloat(String(value).replace(",",".").trim());
+    return isNaN(n)?null:n;
+}
+
+function rnd(a,b){
+    return a+Math.random()*(b-a);
+}
+
+function collectEnteredResults(){
+    let values=[];
+    for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+            const v=parseNumber(document.getElementById(inputId("rslt",r,c)).value);
+            if(v!==null) values.push(v);
+        }
+    }
+    return values;
+}
+
+function randomFromEntered(values){
+    if(values.length===0) return rnd(0,20);
+
+    const base=values[Math.floor(Math.random()*values.length)];
+    const spread=Math.max(0.5,Math.abs(base)*0.15);
+    let value=base+rnd(-spread,spread);
+
+    if(value<0) value=0;
+    return value;
+}
+
+function odFromResult(result){
+    // учебная обратная зависимость: выше RSLT -> ниже OD
+    let od=1.75-(result/900)*1.45;
+    if(od<0.25) od=0.25;
+    if(od>1.75) od=1.75;
+    od+=rnd(-0.02,0.02);
+    if(od<0.001) od=0.001;
+    return od;
+}
+
+function generateRun(){
+    const values=collectEnteredResults();
+
+    for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+            const rsltInput=document.getElementById(inputId("rslt",r,c));
+            const odInput=document.getElementById(inputId("od",r,c));
+
+            if(rsltInput.value.trim()===""){
+                const value=randomFromEntered(values);
+                rsltInput.value=value.toFixed(2);
+            }
+
+            if(odInput.value.trim()===""){
+                const resultValue=parseNumber(rsltInput.value)||0;
+                odInput.value=odFromResult(resultValue).toFixed(3);
+            }
+        }
+    }
+
+    downloadExcelXML();
+}
+
+function clearSamples(){
+    for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+            const well=wellName(r,c);
+            if(well.startsWith("SMP")){
+                document.getElementById(inputId("od",r,c)).value="";
+                document.getElementById(inputId("rslt",r,c)).value="";
+            }
+        }
+    }
+}
+
+function xmlEscape(value){
+    return String(value)
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;");
+}
+
+function cellXml(value,style="Default"){
+    value=xmlEscape(value);
+    return `<Cell ss:StyleID="${style}"><Data ss:Type="String">${value}</Data></Cell>`;
+}
+
+function downloadExcelXML(){
+    // Это не HTML-притворяющийся Excel, а Excel XML Spreadsheet 2003.
+    // Поэтому Excel/Numbers не должны показывать исходный HTML-код.
+    let xml=`<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Styles>
+ <Style ss:ID="Default">
+  <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+  <Borders>
+   <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+   <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+   <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+   <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+  </Borders>
+ </Style>
+ <Style ss:ID="Header"><Font ss:Bold="1"/><Interior ss:Color="#D9E2F3" ss:Pattern="Solid"/></Style>
+ <Style ss:ID="Label"><Font ss:Bold="1"/><Interior ss:Color="#EEF2F7" ss:Pattern="Solid"/></Style>
+ <Style ss:ID="Well"><Font ss:Bold="1"/><Interior ss:Color="#FAFAFA" ss:Pattern="Solid"/></Style>
+</Styles>
+<Worksheet ss:Name="Run_001">
+<Table>`;
+
+    xml+=`<Column ss:Width="75"/>`;
+    for(let c=0;c<COLS;c++) xml+=`<Column ss:Width="72"/>`;
+
+    xml+="<Row>"+cellXml("", "Header");
+    for(let c=1;c<=COLS;c++) xml+=cellXml(c,"Header");
+    xml+="</Row>";
+
+    for(let r=0;r<ROWS;r++){
+        xml+="<Row>"+cellXml("CALL","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml("");
+        xml+="</Row>";
+
+        xml+="<Row>"+cellXml("CalcOD","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml(document.getElementById(inputId("od",r,c)).value);
+        xml+="</Row>";
+
+        xml+="<Row>"+cellXml("Well","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml(wellName(r,c),"Well");
+        xml+="</Row>";
+
+        xml+="<Row>"+cellXml("RSLT","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml(document.getElementById(inputId("rslt",r,c)).value);
+        xml+="</Row>";
+
+        if(r<ROWS-1){
+            xml+=`<Row ss:Height="8">`;
+            for(let c=0;c<=COLS;c++) xml+=cellXml("");
+            xml+="</Row>";
+        }
+    }
+
+    xml+=`</Table>
+</Worksheet>
+</Workbook>`;
+
+    const blob=new Blob([xml],{type:"application/vnd.ms-excel;charset=utf-8"});
+    const link=document.createElement("a");
+    link.href=URL.createObjectURL(blob);
+    link.download="Run_001.xls";
+    link.click();
+    URL.revokeObjectURL(link.href);
+}
+
+buildTable();
+</script>
+
+</body>
+</html>
