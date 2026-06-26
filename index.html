@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>ELISA Run Generator</title>
+<title>Generator</title>
 <style>
 body{margin:20px;font-family:Arial,sans-serif;background:#f4f6f8}
 h2{margin:0 0 12px 0}
@@ -15,6 +15,7 @@ th{background:#e6edf7;font-weight:bold}
 input{width:72px;border:none;outline:none;text-align:center;font-size:13px;background:transparent}
 input:focus{background:#fff8bf}
 .wellcell{font-weight:bold;background:#fafafa}
+.selectedBlock{background:#b7d7ff !important}
 .blockgap td{height:8px;background:#f4f6f8;border-left:none;border-right:none}
 </style>
 </head>
@@ -23,6 +24,7 @@ input:focus{background:#fff8bf}
 
 <h2>🐈</h2>
 <button onclick="generateRun()">Сгенерировать продолжение и скачать Excel</button>
+<button onclick="generateRunSet(20)">Сгенерировать 20 листов</button>
 <button onclick="clearSamples()">Очистить SMP</button>
 
 <table id="report"></table>
@@ -149,37 +151,151 @@ function collectEnteredSampleODs(){
     return ods;
 }
 
-function generateSampleOD(sampleODs,standards){
-    // Если введены реальные SMP, продолжаем похожее распределение OD.
-    if(sampleODs.length>0){
-        const base=sampleODs[Math.floor(Math.random()*sampleODs.length)];
-        const spread=Math.max(0.015,Math.abs(base)*0.035);
-        let od=base+rnd(-spread,spread);
+function analyzeSeries(sampleODs,standards){
+    const hasStandards = standards.length >= 2;
 
-        if(standards.length>=2){
-            const maxOD=Math.max(...standards.map(s=>s.od));
-            const minOD=Math.min(...standards.map(s=>s.od));
-            od=Math.max(minOD,Math.min(maxOD,od));
+    const minCal = hasStandards ? Math.min(...standards.map(s=>s.od)) : 0.25;
+    const maxCal = hasStandards ? Math.max(...standards.map(s=>s.od)) : 1.75;
+
+    if(sampleODs.length === 0){
+        return {
+            n:0,
+            minCal,
+            maxCal,
+            mean:(minCal+maxCal)/2,
+            sd:(maxCal-minCal)/6,
+            min:minCal,
+            max:maxCal,
+            q1:minCal+(maxCal-minCal)*0.55,
+            median:minCal+(maxCal-minCal)*0.75,
+            q3:maxCal,
+            type:"default"
+        };
+    }
+
+    const sorted=[...sampleODs].sort((a,b)=>a-b);
+    const n=sorted.length;
+
+    const mean=sampleODs.reduce((a,b)=>a+b,0)/n;
+    const variance=sampleODs.reduce((a,b)=>a+Math.pow(b-mean,2),0)/n;
+    const sd=Math.sqrt(variance);
+
+    function quantile(q){
+        const pos=(n-1)*q;
+        const base=Math.floor(pos);
+        const rest=pos-base;
+
+        if(sorted[base+1]!==undefined){
+            return sorted[base]+rest*(sorted[base+1]-sorted[base]);
         }
 
-        return od;
+        return sorted[base];
     }
 
-    // Если SMP ещё не введены, берём учебный диапазон:
-    // чаще высокие OD и низкие RSLT, как в исходном примере.
-    if(standards.length>=2){
-        const maxOD=Math.max(...standards.map(s=>s.od));
-        const minOD=Math.min(...standards.map(s=>s.od));
-        const low=minOD+(maxOD-minOD)*0.35;
-        const high=maxOD;
-        return rnd(low,high);
+    const min=sorted[0];
+    const max=sorted[n-1];
+    const q1=quantile(0.25);
+    const median=quantile(0.50);
+    const q3=quantile(0.75);
+    const range=max-min;
+
+    let type="ordinary";
+
+    if(n>=8 && sd<0.035) type="tight";
+    if(n>=8 && (sd>0.12 || range>0.35)) type="mixed";
+
+    return {n,minCal,maxCal,mean,sd,min,max,q1,median,q3,type};
+}
+
+function normalRandom(mean,sd){
+    // Box-Muller
+    let u=0,v=0;
+    while(u===0) u=Math.random();
+    while(v===0) v=Math.random();
+
+    const z=Math.sqrt(-2.0*Math.log(u))*Math.cos(2.0*Math.PI*v);
+    return mean+z*sd;
+}
+
+function clamp(value,min,max){
+    return Math.max(min,Math.min(max,value));
+}
+
+function generateSampleOD(sampleODs,standards){
+    const model=analyzeSeries(sampleODs,standards);
+
+    // Нет введённых SMP — стартовое учебное распределение.
+    if(model.n===0){
+        const r=Math.random();
+
+        if(r<0.70){
+            return rnd(model.minCal+(model.maxCal-model.minCal)*0.60,model.maxCal);
+        }
+
+        if(r<0.93){
+            return rnd(model.minCal+(model.maxCal-model.minCal)*0.30,model.minCal+(model.maxCal-model.minCal)*0.70);
+        }
+
+        return rnd(model.minCal,model.maxCal);
     }
 
-    return rnd(0.8,1.75);
+    // Память последних значений: серия не скачет хаотично.
+    const recent=sampleODs.slice(-8);
+    const recentMean=recent.reduce((a,b)=>a+b,0)/recent.length;
+    const recentVar=recent.reduce((a,b)=>a+Math.pow(b-recentMean,2),0)/recent.length;
+    const recentSd=Math.sqrt(recentVar);
+
+    const r=Math.random();
+    let od;
+
+    if(model.type==="tight"){
+        if(r<0.75){
+            // 75% — рядом с последними лунками
+            od=normalRandom(recentMean,Math.max(0.012,recentSd*1.10,model.sd*0.60));
+        }else if(r<0.95){
+            // 20% — рядом с общей медианой
+            od=normalRandom(model.median,Math.max(0.018,model.sd*1.10));
+        }else{
+            // 5% — редкое отклонение
+            od=rnd(model.min-0.06,model.max+0.06);
+        }
+    }else if(model.type==="mixed"){
+        if(r<0.45){
+            // смешанная серия: часть идет от последних значений
+            od=normalRandom(recentMean,Math.max(0.025,recentSd*1.20));
+        }else if(r<0.75){
+            // часть копирует один из реальных кластеров
+            const base=sampleODs[Math.floor(Math.random()*sampleODs.length)];
+            od=normalRandom(base,Math.max(0.02,model.sd*0.35));
+        }else if(r<0.93){
+            od=rnd(model.q1,model.q3);
+        }else if(r<0.98){
+            od=rnd(model.min,model.max);
+        }else{
+            od=Math.random()<0.5 ? rnd(model.minCal,model.min) : rnd(model.max,model.maxCal);
+        }
+    }else{
+        if(r<0.60){
+            od=normalRandom(recentMean,Math.max(0.018,recentSd*1.15,model.sd*0.45));
+        }else if(r<0.85){
+            const base=sampleODs[Math.floor(Math.random()*sampleODs.length)];
+            od=normalRandom(base,Math.max(0.018,model.sd*0.55));
+        }else if(r<0.96){
+            od=normalRandom(model.mean,Math.max(0.025,model.sd));
+        }else{
+            od=rnd(model.min,model.max);
+        }
+    }
+
+    return clamp(od,model.minCal,model.maxCal);
 }
 
 function resultFromCalibration(od,standards){
     if(standards.length<2) return 0;
+
+    // standards отсортированы по OD от большего к меньшему.
+    // Считаем не линейно по RSLT, а линейно по log(RSLT + 1).
+    // Это ближе к типичной калибровочной кривой ИФА.
 
     const highestOD=standards[0];
     const lowestOD=standards[standards.length-1];
@@ -193,16 +309,105 @@ function resultFromCalibration(od,standards){
 
         if(od<=a.od && od>=b.od){
             const k=(od-a.od)/(b.od-a.od);
-            return a.rslt+k*(b.rslt-a.rslt);
+
+            const logA=Math.log(a.rslt+1);
+            const logB=Math.log(b.rslt+1);
+
+            const logResult=logA+k*(logB-logA);
+
+            return Math.exp(logResult)-1;
         }
     }
 
     return 0;
 }
 
+function createSeriesModel(sampleODs,standards){
+    const base=analyzeSeries(sampleODs,standards);
+
+    let center=base.n>0 ? base.median : base.mean;
+    let noise=Math.max(0.014, base.sd || (base.maxCal-base.minCal)*0.035);
+
+    if(base.type==="tight") noise=Math.max(0.012,noise*0.85);
+    if(base.type==="mixed") noise=Math.max(0.025,noise*1.25);
+
+    return {
+        centerOD:center,
+        drift:rnd(-0.004,0.004),
+        noise:noise,
+        memory:0.62,
+        minCal:base.minCal,
+        maxCal:base.maxCal,
+        type:base.type,
+        step:0,
+        shockChance: base.type==="mixed" ? 0.055 : 0.025
+    };
+}
+
+function updateSeriesModel(model,newOD,standards){
+    model.step++;
+
+    // Центр серии медленно подтягивается к новым значениям.
+    model.centerOD = model.centerOD*model.memory + newOD*(1-model.memory);
+
+    // Медленный дрейф: серия чуть уплывает, а не стоит на месте.
+    model.centerOD += model.drift;
+
+    // Дрейф тоже немного меняется.
+    model.drift += rnd(-0.0008,0.0008);
+    model.drift = clamp(model.drift,-0.008,0.008);
+
+    // Иногда меняется "день": чуть шире/уже шум.
+    if(Math.random()<0.06){
+        model.noise *= rnd(0.85,1.18);
+        model.noise = clamp(model.noise,0.010,0.090);
+    }
+
+    model.centerOD = clamp(model.centerOD,model.minCal,model.maxCal);
+}
+
+function generateSampleODFromModel(model,history,standards){
+    const recent=history.slice(-5);
+    let recentMean=model.centerOD;
+
+    if(recent.length>0){
+        recentMean=recent.reduce((a,b)=>a+b,0)/recent.length;
+    }
+
+    const r=Math.random();
+    let target;
+
+    if(r<0.58){
+        // Чаще — рядом с текущим центром серии.
+        target=normalRandom(model.centerOD,model.noise);
+    }else if(r<0.86){
+        // Иногда — рядом с последними лунками.
+        target=normalRandom(recentMean,model.noise*0.9);
+    }else if(r<0.97){
+        // Иногда — шире обычного диапазона.
+        target=normalRandom(model.centerOD,model.noise*2.2);
+    }else{
+        // Редкий выброс к одному из краёв калибровки.
+        if(Math.random()<0.5){
+            target=rnd(model.minCal,model.centerOD);
+        }else{
+            target=rnd(model.centerOD,model.maxCal);
+        }
+    }
+
+    // Редкий "шок" — отдельный нетипичный образец.
+    if(Math.random()<model.shockChance){
+        target += rnd(-1,1)*model.noise*4.0;
+    }
+
+    return clamp(target,model.minCal,model.maxCal);
+}
+
+
 function generateRun(){
     const standards=collectStandards();
-    const sampleODs=collectEnteredSampleODs();
+    let dynamicSampleODs=collectEnteredSampleODs();
+    let model=createSeriesModel(dynamicSampleODs,standards);
 
     for(let r=0;r<ROWS;r++){
         for(let c=0;c<COLS;c++){
@@ -213,13 +418,22 @@ function generateRun(){
             const odInput=document.getElementById(inputId("od",r,c));
             const rsltInput=document.getElementById(inputId("rslt",r,c));
 
-            if(odInput.value.trim()===""){
-                const odValue=generateSampleOD(sampleODs,standards);
+            let odValue=parseNumber(odInput.value);
+
+            if(odValue===null){
+                odValue=generateSampleODFromModel(model,dynamicSampleODs,standards);
                 odInput.value=odValue.toFixed(3);
+
+                dynamicSampleODs.push(odValue);
+                updateSeriesModel(model,odValue,standards);
+            }else{
+                if(!dynamicSampleODs.includes(odValue)){
+                    dynamicSampleODs.push(odValue);
+                    updateSeriesModel(model,odValue,standards);
+                }
             }
 
             if(rsltInput.value.trim()===""){
-                const odValue=parseNumber(odInput.value);
                 const resultValue=resultFromCalibration(odValue,standards);
                 rsltInput.value=resultValue.toFixed(3);
             }
@@ -241,6 +455,412 @@ function clearSamples(){
     }
 }
 
+function setupInputNavigation(){
+    const inputs=[...document.querySelectorAll("input")];
+
+    inputs.forEach(input=>{
+        input.addEventListener("keydown",function(e){
+            if(e.key==="Enter"){
+                e.preventDefault();
+                moveEnter(this);
+            }
+
+            if(e.key==="Tab"){
+                e.preventDefault();
+
+                if(e.shiftKey){
+                    moveFocus(this,0,-1);
+                }else{
+                    moveFocus(this,0,1);
+                }
+            }
+        });
+
+        input.addEventListener("paste",function(e){
+            const text=e.clipboardData.getData("text");
+
+            if(!text) return;
+
+            e.preventDefault();
+            pasteData(this,text);
+        });
+    });
+}
+
+function inputInfo(input){
+    const parts=input.id.split("_");
+
+    return {
+        type:parts[0],
+        row:parseInt(parts[1]),
+        col:parseInt(parts[2])
+    };
+}
+
+function focusInput(type,row,col){
+    if(row>=ROWS){
+        row=0;
+        col++;
+    }
+
+    if(row<0){
+        row=ROWS-1;
+        col--;
+    }
+
+    if(col>=COLS) col=0;
+    if(col<0) col=COLS-1;
+
+    const target=document.getElementById(inputId(type,row,col));
+
+    if(target){
+        target.focus();
+        target.select();
+    }
+}
+
+function moveFocus(input,rowStep,colStep){
+    const info=inputInfo(input);
+
+    let row=info.row+rowStep;
+    let col=info.col+colStep;
+
+    focusInput(info.type,row,col);
+}
+
+function moveEnter(input){
+    const info=inputInfo(input);
+
+    if(info.type==="od"){
+        focusInput("rslt",info.row,info.col);
+        return;
+    }
+
+    if(info.type==="rslt"){
+        focusInput("od",info.row+1,info.col);
+        return;
+    }
+
+    moveFocus(input,1,0);
+}
+
+function pasteData(startInput,text){
+    const start=inputInfo(startInput);
+
+    const rawItems=text
+        .replace(/\r/g,"")
+        .split(/\n|\t/)
+        .map(x=>x.trim())
+        .filter(x=>x!=="");
+
+    if(rawItems.length===0) return;
+
+    const isWell = v => /^smp\d+$/i.test(v) || /^std\d+$/i.test(v);
+    const getNumber = v => {
+        const m=v.match(/-?\d+(?:[.,]\d+)?/);
+        return m ? m[0].replace(",",".") : null;
+    };
+
+    // Специальный режим для копирования старого блока:
+    // 1.244
+    // SMP19
+    // 8.670
+    //
+    // То есть число перед SMP/STD -> CalcOD,
+    // число после SMP/STD -> RSLT.
+    let triples=[];
+    for(let i=1;i<rawItems.length-1;i++){
+        if(isWell(rawItems[i])){
+            const od=getNumber(rawItems[i-1]);
+            const rslt=getNumber(rawItems[i+1]);
+
+            if(od!==null && rslt!==null){
+                triples.push({od,rslt});
+                i++; // пропускаем RSLT, чтобы не использовать его повторно
+            }
+        }
+    }
+
+    if(triples.length>0){
+        let pos=blockPos(start.row,start.col);
+
+        triples.forEach(t=>{
+            if(pos>=ROWS*COLS) return;
+
+            const b=blockFromPos(pos);
+            const odTarget=document.getElementById(inputId("od",b.row,b.col));
+            const rsltTarget=document.getElementById(inputId("rslt",b.row,b.col));
+
+            if(odTarget) odTarget.value=t.od;
+            if(rsltTarget) rsltTarget.value=t.rslt;
+
+            pos++;
+        });
+
+        const b=blockFromPos(Math.min(pos,ROWS*COLS-1));
+        focusInput("od",b.row,b.col);
+        selectionStart={row:b.row,col:b.col};
+        selectionEnd={row:b.row,col:b.col};
+        highlightSelectedBlocks();
+        return;
+    }
+
+    // Если скопировали блок с заголовками CalcOD/RSLT, работаем по заголовкам.
+    const joined=rawItems.join(" ").toLowerCase();
+
+    if(joined.includes("calcod") || joined.includes("rslt")){
+        let mode=null;
+        let row=start.row;
+        const col=start.col;
+
+        rawItems.forEach(cell=>{
+            const lower=cell.toLowerCase();
+
+            if(lower.includes("calcod")){
+                mode="od";
+                return;
+            }
+
+            if(lower.includes("rslt")){
+                mode="rslt";
+                return;
+            }
+
+            if(lower.includes("call") || lower.includes("well") || isWell(cell)){
+                return;
+            }
+
+            const number=getNumber(cell);
+            if(number===null || mode===null) return;
+            if(row>=ROWS) return;
+
+            const target=document.getElementById(inputId(mode,row,col));
+            if(target) target.value=number;
+
+            if(mode==="rslt"){
+                row++;
+                mode=null;
+            }
+        });
+
+        focusInput("od",Math.min(row,ROWS-1),col);
+        return;
+    }
+
+    // Обычный режим: вставляем только числа вниз в тот тип поля, куда кликнули.
+    const numericItems=rawItems
+        .map(getNumber)
+        .filter(v=>v!==null);
+
+    let pos=blockPos(start.row,start.col);
+
+    numericItems.forEach((value,index)=>{
+        const b=blockFromPos(pos+index);
+        const target=document.getElementById(inputId(start.type,b.row,b.col));
+        if(target) target.value=value;
+    });
+
+    const b=blockFromPos(Math.min(pos+numericItems.length,ROWS*COLS-1));
+    focusInput(start.type,b.row,b.col);
+    selectionStart={row:b.row,col:b.col};
+    selectionEnd={row:b.row,col:b.col};
+    highlightSelectedBlocks();
+}
+
+
+let selectionStart = null;
+let selectionEnd = null;
+let isDraggingBlocks = false;
+
+function blockPos(row,col){
+    return col*ROWS+row;
+}
+
+function blockFromPos(pos){
+    return {
+        row: pos % ROWS,
+        col: Math.floor(pos / ROWS)
+    };
+}
+
+function normalizeSelection(){
+    if(!selectionStart || !selectionEnd) return null;
+
+    const a=blockPos(selectionStart.row,selectionStart.col);
+    const b=blockPos(selectionEnd.row,selectionEnd.col);
+
+    return {
+        from: Math.min(a,b),
+        to: Math.max(a,b)
+    };
+}
+
+function setupBlockSelection(){
+    document.querySelectorAll("input").forEach(input=>{
+        input.addEventListener("focus",function(e){
+            const info=inputInfo(this);
+
+            if(!selectionStart){
+                selectionStart={row:info.row,col:info.col};
+                selectionEnd={row:info.row,col:info.col};
+                highlightSelectedBlocks();
+            }
+        });
+
+        input.addEventListener("mousedown",function(e){
+            const info=inputInfo(this);
+
+            if(e.shiftKey && selectionStart){
+                selectionEnd={row:info.row,col:info.col};
+            }else{
+                selectionStart={row:info.row,col:info.col};
+                selectionEnd={row:info.row,col:info.col};
+            }
+
+            isDraggingBlocks=true;
+            highlightSelectedBlocks();
+        });
+
+        input.addEventListener("mouseover",function(e){
+            if(!isDraggingBlocks) return;
+            const info=inputInfo(this);
+            selectionEnd={row:info.row,col:info.col};
+            highlightSelectedBlocks();
+        });
+    });
+
+    document.querySelectorAll(".wellcell").forEach(td=>{
+        td.addEventListener("mousedown",function(e){
+            const info=wellCellInfo(this);
+
+            if(e.shiftKey && selectionStart){
+                selectionEnd={row:info.row,col:info.col};
+            }else{
+                selectionStart={row:info.row,col:info.col};
+                selectionEnd={row:info.row,col:info.col};
+            }
+
+            isDraggingBlocks=true;
+            highlightSelectedBlocks();
+        });
+
+        td.addEventListener("mouseover",function(e){
+            if(!isDraggingBlocks) return;
+            const info=wellCellInfo(this);
+            selectionEnd={row:info.row,col:info.col};
+            highlightSelectedBlocks();
+        });
+    });
+
+    document.addEventListener("mouseup",function(){
+        isDraggingBlocks=false;
+    });
+
+    document.addEventListener("keydown",function(e){
+        if((e.metaKey || e.ctrlKey) && e.key.toLowerCase()==="c"){
+            const sel=normalizeSelection();
+            if(sel){
+                e.preventDefault();
+                copySelectedBlocks();
+            }
+        }
+
+        if((e.key==="Delete" || e.key==="Backspace") && document.activeElement.tagName!=="INPUT"){
+            const sel=normalizeSelection();
+            if(sel){
+                e.preventDefault();
+                clearSelectedBlocks();
+            }
+        }
+    });
+}
+
+function wellCellInfo(td){
+    const parts=td.id.split("_");
+    return {
+        row:parseInt(parts[1]),
+        col:parseInt(parts[2])
+    };
+}
+
+function highlightSelectedBlocks(){
+    document.querySelectorAll(".selectedBlock").forEach(el=>{
+        el.classList.remove("selectedBlock");
+    });
+
+    const sel=normalizeSelection();
+    if(!sel) return;
+
+    for(let pos=sel.from; pos<=sel.to; pos++){
+        const b=blockFromPos(pos);
+        const r=b.row;
+        const c=b.col;
+
+        const od=document.getElementById(inputId("od",r,c));
+        const rslt=document.getElementById(inputId("rslt",r,c));
+        const well=document.getElementById(inputId("well",r,c));
+
+        if(od) od.parentElement.classList.add("selectedBlock");
+        if(rslt) rslt.parentElement.classList.add("selectedBlock");
+        if(well) well.classList.add("selectedBlock");
+    }
+}
+
+function blockText(row,col){
+    const od=document.getElementById(inputId("od",row,col)).value;
+    const well=wellName(row,col);
+    const rslt=document.getElementById(inputId("rslt",row,col)).value;
+
+    return [od,well,rslt].join("\n");
+}
+
+function copySelectedBlocks(){
+    const sel=normalizeSelection();
+    if(!sel) return;
+
+    let parts=[];
+
+    for(let pos=sel.from; pos<=sel.to; pos++){
+        const b=blockFromPos(pos);
+        parts.push(blockText(b.row,b.col));
+    }
+
+    const text=parts.join("\n\n");
+
+    navigator.clipboard.writeText(text).catch(()=>{
+        const ta=document.createElement("textarea");
+        ta.value=text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+    });
+}
+
+function clearSelectedBlocks(){
+    const sel=normalizeSelection();
+    if(!sel) return;
+
+    for(let pos=sel.from; pos<=sel.to; pos++){
+        const b=blockFromPos(pos);
+        const well=wellName(b.row,b.col);
+
+        if(well.startsWith("STD")) continue;
+
+        document.getElementById(inputId("od",b.row,b.col)).value="";
+        document.getElementById(inputId("rslt",b.row,b.col)).value="";
+    }
+}
+
+function nextBlockPosition(row,col,offset){
+    let pos=blockPos(row,col)+offset;
+
+    if(pos<0) pos=0;
+    if(pos>=ROWS*COLS) pos=ROWS*COLS-1;
+
+    return blockFromPos(pos);
+}
+
 function xmlEscape(value){
     return String(value)
         .replaceAll("&","&amp;")
@@ -253,6 +873,161 @@ function cellXml(value,style="Default"){
     value=xmlEscape(value);
     return `<Cell ss:StyleID="${style}"><Data ss:Type="String">${value}</Data></Cell>`;
 }
+
+function snapshotData(){
+    let data=[];
+
+    for(let r=0;r<ROWS;r++){
+        data[r]=[];
+
+        for(let c=0;c<COLS;c++){
+            data[r][c]={
+                od:document.getElementById(inputId("od",r,c)).value,
+                rslt:document.getElementById(inputId("rslt",r,c)).value
+            };
+        }
+    }
+
+    return data;
+}
+
+function restoreData(data){
+    for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+            document.getElementById(inputId("od",r,c)).value=data[r][c].od;
+            document.getElementById(inputId("rslt",r,c)).value=data[r][c].rslt;
+        }
+    }
+}
+
+function generateMissingOnly(){
+    const standards=collectStandards();
+    let dynamicSampleODs=collectEnteredSampleODs();
+    let model=createSeriesModel(dynamicSampleODs,standards);
+
+    for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+            const well=wellName(r,c);
+
+            if(!well.startsWith("SMP")) continue;
+
+            const odInput=document.getElementById(inputId("od",r,c));
+            const rsltInput=document.getElementById(inputId("rslt",r,c));
+
+            let odValue=parseNumber(odInput.value);
+
+            if(odValue===null){
+                odValue=generateSampleODFromModel(model,dynamicSampleODs,standards);
+                odInput.value=odValue.toFixed(3);
+
+                dynamicSampleODs.push(odValue);
+                updateSeriesModel(model,odValue,standards);
+            }else{
+                if(!dynamicSampleODs.includes(odValue)){
+                    dynamicSampleODs.push(odValue);
+                    updateSeriesModel(model,odValue,standards);
+                }
+            }
+
+            if(rsltInput.value.trim()===""){
+                const resultValue=resultFromCalibration(odValue,standards);
+                rsltInput.value=resultValue.toFixed(3);
+            }
+        }
+    }
+}
+
+function sheetXML(sheetName){
+    let xml=`<Worksheet ss:Name="${sheetName}">
+<Table>`;
+
+    xml+=`<Column ss:Width="75"/>`;
+    for(let c=0;c<COLS;c++) xml+=`<Column ss:Width="72"/>`;
+
+    xml+="<Row>"+cellXml("", "Header");
+    for(let c=1;c<=COLS;c++) xml+=cellXml(c,"Header");
+    xml+="</Row>";
+
+    for(let r=0;r<ROWS;r++){
+        xml+="<Row>"+cellXml("CALL","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml("");
+        xml+="</Row>";
+
+        xml+="<Row>"+cellXml("CalcOD","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml(document.getElementById(inputId("od",r,c)).value);
+        xml+="</Row>";
+
+        xml+="<Row>"+cellXml("Well","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml(wellName(r,c),"Well");
+        xml+="</Row>";
+
+        xml+="<Row>"+cellXml("RSLT","Label");
+        for(let c=0;c<COLS;c++) xml+=cellXml(document.getElementById(inputId("rslt",r,c)).value);
+        xml+="</Row>";
+
+        if(r<ROWS-1){
+            xml+=`<Row ss:Height="8">`;
+            for(let c=0;c<=COLS;c++) xml+=cellXml("");
+            xml+="</Row>";
+        }
+    }
+
+    xml+=`</Table>
+</Worksheet>`;
+
+    return xml;
+}
+
+function workbookStart(){
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Styles>
+ <Style ss:ID="Default">
+  <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+  <Borders>
+   <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+   <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+   <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+   <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+  </Borders>
+ </Style>
+ <Style ss:ID="Header"><Font ss:Bold="1"/><Interior ss:Color="#D9E2F3" ss:Pattern="Solid"/></Style>
+ <Style ss:ID="Label"><Font ss:Bold="1"/><Interior ss:Color="#EEF2F7" ss:Pattern="Solid"/></Style>
+ <Style ss:ID="Well"><Font ss:Bold="1"/><Interior ss:Color="#FAFAFA" ss:Pattern="Solid"/></Style>
+</Styles>`;
+}
+
+function downloadXMLWorkbook(xml,filename){
+    const blob=new Blob([xml],{type:"application/vnd.ms-excel;charset=utf-8"});
+    const link=document.createElement("a");
+    link.href=URL.createObjectURL(blob);
+    link.download=filename;
+    link.click();
+    URL.revokeObjectURL(link.href);
+}
+
+function generateRunSet(count){
+    const original=snapshotData();
+    let xml=workbookStart();
+
+    for(let i=1;i<=count;i++){
+        restoreData(original);
+        generateMissingOnly();
+        const sheetName="Run_"+String(i).padStart(2,"0");
+        xml+=sheetXML(sheetName);
+    }
+
+    restoreData(original);
+
+    xml+=`</Workbook>`;
+
+    downloadXMLWorkbook(xml,"Run_Set_"+count+".xls");
+}
+
 
 function downloadExcelXML(){
     // Это не HTML-притворяющийся Excel, а Excel XML Spreadsheet 2003.
@@ -324,6 +1099,8 @@ function downloadExcelXML(){
 }
 
 buildTable();
+setupInputNavigation();
+setupBlockSelection();
 </script>
 
 </body>
